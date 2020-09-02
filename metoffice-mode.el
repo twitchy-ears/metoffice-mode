@@ -75,11 +75,16 @@
 (defvar metoffice-mode-update-timer nil
   "Holds the timer for refreshing the weather")
 
+(defvar metoffice-mode-weather-type-to-symbol t
+  "Controls if the weather type of now/next weather is displayed in the modeline as a unicode symbol from the metoffice-mode-weather-type-to-symbol-table")
+
 (defvar metoffice-mode-now-and-next t
   "By default fetch now and next weather, set to nil to make the string contain just the weather occuring now")
 
-(defvar metoffice-mode-weather-type-to-symbol t
-  "Controls if the weather type of now/next weather is displayed in the modeline as a unicode symbol from the metoffice-mode-weather-type-to-symbol-table")
+(defvar metoffice-mode-modeline-format (if metoffice-mode-now-and-next
+                                           "%s|%s"
+                                         "%s")
+  "The modeline format string, if metoffice-mode-now-and-next is set to 't' then it needs to have two string outputs in (default '%s|%s'), otherwise it needs one (default '%s').")
 
 (defvar metoffice-mode-weather-type-to-symbol-table
   '(("Clear night" . "☽")
@@ -121,6 +126,12 @@
 (defvar metoffice-mode-cold-temp-threshold 19
   "If the temperature is this or below then the modeline will show blue, otherwise red.  Yes it should be like a neat gradient between the two but I am very lazy")
 
+(defvar metoffice-mode-data-cache-file (expand-file-name "~/.metoffice-mode-data-cache")
+  "File that stores cached results so that network queries don't have to be made on startup")
+
+(defvar metoffice-mode-data-cache nil
+  "Variable that holds the cached data from the metoffice-mode-data-cache-file")
+
 (defun metoffice-mode-day-or-night ()
   "Returns if we are in a 'day' (07:00 -> 19:00) or 'night' (19:00 -> 07:00) time"
   (let ((hour (nth 2 (decode-time))))
@@ -148,8 +159,6 @@
         (if (eq bgcolour 'warm)
             (propertize text 'face '(:foreground "firebrick3"))
           (propertize text 'face '(:foreground "DeepSkyBlue4")))
-;;            (propertize text 'face '(:background "firebrick3" :foreground "white"))
-;;          (propertize text 'face '(:background "SkyBlue" :foreground "black")))
       text)))
 
 ;defun metoffice-mode-modeline-string-output (fmt weather-types)
@@ -159,11 +168,65 @@
 ;            (message "metoffice-mode: metoffice-mode-modeline-string-output(%s, %s): error with formatting" fmt weather-types)
 ;            ["W"]))))
 
+(defun metoffice-mode-get-file-mtime (filename)
+  "Returns the time in seconds between now and the files mtime"
+  (let* ((timechange-epoch (string-to-number
+                            (format-time-string "%s" (nth 5 (file-attributes (expand-file-name filename))))))
+         (now-epoch (string-to-number (format-time-string "%s" (current-time)))))
+    (- now-epoch timechange-epoch)))
+
+(defun metoffice-mode-data-fetcher (cachefile maxage fetch-command)
+  "Takes a cachefile, a maxage, and a fetch-command.
+
+If the cachefile doesn't exist or it's mtime is >= the maxage it will eval the fetch-command and store the results in the cachefile.
+
+Otherwise it will check the metoffice-mode-data-cache variable, if its populated it will return it, otherwise it will read the cachefile into the metoffice-mode-data-cache variable and return that."
+
+  (let* ((filepath (expand-file-name cachefile))
+         (cacheok (if (and (file-exists-p filepath)
+                           (<= (metoffice-mode-get-file-mtime filepath)
+                               maxage))
+                           t
+                           nil)))
+    (if cacheok
+
+        ;; Cache is okay to use, so if we have already stashed it in a
+        ;; variable return that, otherwise pull it out of the file
+        ;; into a variable
+        (if metoffice-mode-data-cache
+            metoffice-mode-data-cache
+          (progn
+            ;; (message "metoffice-mode restoring from cache")
+            
+            ;; Set variable from cache
+            (setq metoffice-mode-data-cache
+                  (read (with-temp-buffer
+                          (insert-file-contents filepath)
+                          (buffer-string))))
+
+            ;; Return
+            metoffice-mode-data-cache))
+
+      ;; Otherwise run the function and dump it into the file
+      (progn
+        ;; (message "metoffice-mode fetching fresh")
+        ;; Fetch data
+        (setq metoffice-mode-data-cache (eval fetch-command))
+
+        ;; Dump to cache file
+        (with-temp-file filepath
+          (prin1 metoffice-mode-data-cache (current-buffer)))
+
+        ; Return
+        metoffice-mode-data-cache))))
+
 (defun metoffice-mode-get-current-weather-type (&optional siteid)
   "Fetches just the current weather-type as a string using metoffice.el, also stops the output of the message to the status line"
   (let* ((location (or siteid metoffice-home-location))
          (inhibit-message t)
-         (data (metoffice-get-site-period-weather location 0) 'weather-type)
+         (data (metoffice-mode-data-fetcher metoffice-mode-data-cache-file
+                                            metoffice-mode-update-in-seconds
+                                            '(metoffice-get-site-period-weather location 0)))
          (wt (metoffice-weather-aspect data 'weather-type))
          (dn-now (metoffice-mode-day-or-night))
 
@@ -179,12 +242,16 @@
                      (metoffice-mode-weather-to-symbol wt temp)
                    metoffice-mode-current-weather-short)))
     
-    (cons mltext wt)))
+    (cons (format metoffice-mode-modeline-format
+                  mltext)
+          (format "%s, feels like %i°C" wt temp))))
 
 (defun metoffice-mode-get-now-and-next-weather-type (&optional siteid)
   "Returns a string showing the current weather (and date + day/night) as well as the next block of times weather - so the current days night if this is a day period and the next days day if this is a night period"
   (let* ((inhibit-message t)
-         (data (metoffice-get-site-weather siteid))
+         (data (metoffice-mode-data-fetcher metoffice-mode-data-cache-file
+                                            metoffice-mode-update-in-seconds
+                                            '(metoffice-get-site-weather siteid)))
          (dn-now (metoffice-mode-day-or-night))
          (dn-next (metoffice-mode-inverse-day-or-night))
          (date-now (car (nth 0 data)))
@@ -218,7 +285,7 @@
     ;; (message "wt-now '%s' wt-next '%s'" wt-now wt-next)
     
     (cons (if metoffice-mode-weather-type-to-symbol
-              (format "[%s|%s]"
+              (format metoffice-mode-modeline-format
                       (metoffice-mode-weather-to-symbol wt-now temp-now)
                       (metoffice-mode-weather-to-symbol wt-next temp-next))
             metoffice-mode-current-weather-short)
