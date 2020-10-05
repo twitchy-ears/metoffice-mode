@@ -369,27 +369,3 @@ Run from a timer when the mode is enabled every metoffice-mode-update-in-seconds
       (setq metoffice-mode-update-timer nil))))
 
 (provide 'metoffice-mode)
-
-
-(define-minor-mode metoffice-mode
-  "When enabled will show a [W] in the modeline with a tooltip
-  for current weather and refreshes it periodically"
-  nil
-  nil
-  nil
-  :global t
-  (if metoffice-mode
-      (progn
-        (metoffice-mode-update-current-weather)
-        (setq mode-line-misc-info (cons '(:eval (metoffice-mode-output-modeline)) mode-line-misc-info))
-        (setq metoffice-mode-update-timer
-              (run-with-timer metoffice-mode-update-in-seconds metoffice-mode-update-in-seconds
-                              (lambda () (metoffice-mode-update-current-weather)))))
-    (progn
-      (setq mode-line-misc-info (cl-remove-if (lambda (k) (cl-search "(:eval (metoffice-mode-output-modeline))" (format "%s" k))) mode-line-misc-info))
-      (cancel-timer metoffice-mode-update-timer)
-      (setq metoffice-mode-update-timer nil))))
-
-(provide 'metoffice-mode)
-
-
